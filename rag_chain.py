@@ -10,6 +10,7 @@ about how it's being served.
 """
 
 import os
+import re
 from functools import lru_cache
 
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -28,8 +29,33 @@ Dont provide anything out of the given context
 Context: {context}
 Question: {question}
 
-Start the answer directly. No small talk please.
+Give a thorough, well-explained answer using everything relevant in the
+context above — aim for several sentences or short paragraphs rather than
+a one-liner, covering causes, symptoms, or next steps where the context
+supports it. Write in plain sentences only — no markdown, no asterisks,
+no bullet points, no headings. Start the answer directly. No small talk please.
 """
+
+
+def plain_text_clean(text: str) -> str:
+    """Strips markdown formatting the model may add despite the prompt
+    asking it not to, and normalizes whitespace into plain paragraphs.
+    Runs on every answer regardless of what the model actually outputs,
+    so the API's output is guaranteed plain text either way."""
+    # Bold/italic markers: **text**, __text__, *text*, _text_
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"(?<!\w)\*(.*?)\*(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.*?)_(?!\w)", r"\1", text)
+    # Markdown headings (#, ##, ...) and bullet/list markers at line starts
+    text = re.sub(r"(?m)^#{1,6}\s*", "", text)
+    text = re.sub(r"(?m)^[\-\*\u2022]\s+", "", text)
+    text = re.sub(r"(?m)^\d+\.\s+", "", text)
+    # Collapse 3+ newlines down to a double newline (paragraph break),
+    # and any run of spaces/tabs down to one space
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
 
 
 def set_custom_prompt(template: str) -> PromptTemplate:
@@ -59,13 +85,15 @@ def get_qa_chain() -> RetrievalQA:
     llm = ChatGroq(
         model_name="openai/gpt-oss-20b",
         temperature=0.0,
+        max_tokens=4096,  # generous budget: gpt-oss models use some of this on hidden
+        # reasoning by default, so this leaves plenty left over for a full visible answer
         groq_api_key=os.environ["GROQ_API_KEY"],
     )
 
     return RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),  # more context chunks to draw on
         return_source_documents=True,
         chain_type_kwargs={"prompt": set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)},
     )
@@ -86,4 +114,4 @@ def answer_query(question: str) -> dict:
             "page": doc.metadata.get("page", None),
         })
 
-    return {"result": response["result"], "sources": sources}
+    return {"result": plain_text_clean(response["result"]), "sources": sources}
